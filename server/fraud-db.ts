@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { fraudVpas, urlBlacklist, scanLogs, merchantReputation } from "../drizzle/fraud-schema";
@@ -370,6 +370,7 @@ export async function updateMerchantReputation(
         bankName,
         trustScore,
         lastScanned: new Date(),
+        scanCount: sql`${merchantReputation.scanCount} + 1`,
       },
     });
     

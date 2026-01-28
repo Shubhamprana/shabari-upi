@@ -12,7 +12,7 @@ let lastCheckTime = 0;
 const CHECK_INTERVAL = 60000; // Re-check every 60 seconds
 
 // Get backend API URL from environment or use default
-const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://127.0.0.1:3000";
+const API_URL = process.env.EXPO_PUBLIC_API_BASE_URL || "http://10.0.2.2:3000";
 
 /**
  * Check if backend is available

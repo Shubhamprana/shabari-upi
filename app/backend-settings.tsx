@@ -152,7 +152,7 @@ export default function BackendSettingsScreen() {
             Backend API URL
           </Text>
           <Text className="text-xs text-muted font-mono">
-            {process.env.EXPO_PUBLIC_API_URL || "http://127.0.0.1:3000"}
+            {process.env.EXPO_PUBLIC_API_BASE_URL || "https://shabari-upi.onrender.com"}
           </Text>
           <Text className="text-xs text-muted leading-relaxed mt-2">
             The backend server must be deployed and publicly accessible for online protection to work. Contact your administrator to deploy the server.

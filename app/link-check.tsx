@@ -8,7 +8,7 @@ import { ScreenContainer } from "@/components/screen-container";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
 import { checkLink, saveLinkRecord, LinkCheckResult } from "@/lib/link-checker";
-import { addTrustedDomain } from "@/lib/trusted-domains";
+import { openInBrowser } from "@/lib/open-in-browser";
 
 export default function LinkCheckScreen() {
   const colors = useColors();
@@ -68,6 +68,8 @@ export default function LinkCheckScreen() {
     try {
       if (Platform.OS === "web") {
         window.open(result.url, "_blank");
+      } else if (Platform.OS === "android") {
+        openInBrowser(result.url);
       } else {
         await WebBrowser.openBrowserAsync(result.url);
       }

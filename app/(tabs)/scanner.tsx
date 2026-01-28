@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Text, View, Pressable, Platform, ActivityIndicator, StyleSheet, Dimensions } from "react-native";
-import { BarCodeScanner } from "expo-barcode-scanner";
+import { Camera, CameraView, useCameraPermissions, type BarcodeScanningResult } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
@@ -14,21 +14,20 @@ const { width, height } = Dimensions.get("window");
 export default function ScannerScreen() {
   const colors = useColors();
   const router = useRouter();
-  const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+  const [permission, requestPermission] = useCameraPermissions();
   const [isScanning, setIsScanning] = useState(false);
   const [scannedData, setScannedData] = useState<string | null>(null);
-  const [isCameraReady, setIsCameraReady] = useState(false);
 
   useEffect(() => {
-    const getBarCodeScannerPermissions = async () => {
-      const { status } = await BarCodeScanner.requestPermissionsAsync();
-      setHasPermission(status === "granted");
-    };
+    if (!permission) return;
+    if (!permission.granted && permission.canAskAgain) {
+      requestPermission();
+    }
+  }, [permission, requestPermission]);
 
-    getBarCodeScannerPermissions();
-  }, []);
-
-  const handleBarCodeScanned = ({ type, data }: { type: string; data: string }) => {
+  const handleBarCodeScanned = (event: BarcodeScanningResult | { nativeEvent: BarcodeScanningResult }) => {
+    const payload = "nativeEvent" in event ? event.nativeEvent : event;
+    const { data } = payload;
     if (isScanning || !data) return;
 
     setIsScanning(true);
@@ -63,11 +62,10 @@ export default function ScannerScreen() {
     });
 
     if (!result.canceled && result.assets[0]) {
-      // For gallery images, we can use BarCodeScanner.scanFromURLAsync
       try {
-        const scannedResults = await BarCodeScanner.scanFromURLAsync(result.assets[0].uri);
+        const scannedResults = await Camera.scanFromURLAsync(result.assets[0].uri, ["qr"]);
         if (scannedResults && scannedResults.length > 0) {
-          handleBarCodeScanned({ type: scannedResults[0].type, data: scannedResults[0].data });
+          handleBarCodeScanned(scannedResults[0]);
         }
       } catch (error) {
         console.log("Error scanning from gallery:", error);
@@ -75,7 +73,7 @@ export default function ScannerScreen() {
     }
   };
 
-  if (hasPermission === null) {
+  if (!permission) {
     return (
       <ScreenContainer className="bg-background items-center justify-center">
         <ActivityIndicator size="large" color={colors.primary} />
@@ -84,7 +82,7 @@ export default function ScannerScreen() {
     );
   }
 
-  if (hasPermission === false) {
+  if (!permission.granted) {
     return (
       <ScreenContainer className="bg-background items-center justify-center p-6">
         <View className="items-center gap-4 max-w-sm">
@@ -97,8 +95,7 @@ export default function ScannerScreen() {
           </Text>
           <Pressable
             onPress={async () => {
-              const { status } = await BarCodeScanner.requestPermissionsAsync();
-              setHasPermission(status === "granted");
+              await requestPermission();
             }}
             style={({ pressed }) => [
               {
@@ -120,10 +117,11 @@ export default function ScannerScreen() {
 
   return (
     <View style={styles.container}>
-      <BarCodeScanner
-        onBarCodeScanned={isScanning ? undefined : handleBarCodeScanned}
+      <CameraView
+        onBarcodeScanned={isScanning ? undefined : handleBarCodeScanned}
         style={StyleSheet.absoluteFillObject}
-        barCodeTypes={[BarCodeScanner.Constants.BarCodeType.qr]}
+        barcodeScannerEnabled={!isScanning}
+        barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
       />
 
       {/* Overlay */}

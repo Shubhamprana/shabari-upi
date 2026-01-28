@@ -353,4 +353,22 @@ export const fraudDetectionRouter = router({
           : "Failed to submit report. Please try again.",
       };
     }),
+    
+  /**
+   * Scan Generic URL
+   * Scans a URL for malware/phishing using Server Logic (GSB, VT)
+   */
+  scanUrl: publicProcedure
+    .input(
+      z.object({
+        url: z.string().url("Invalid URL format"),
+      })
+    )
+    .mutation(async ({ input }) => {
+       const result = await scanLinks(input.url);
+       return {
+         success: true,
+         data: result
+       };
+    }),
 });

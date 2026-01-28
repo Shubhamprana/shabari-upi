@@ -30,7 +30,11 @@ async function isBackendAvailable(): Promise<boolean> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000);
     
-    const response = await fetch(`${API_URL}/api/trpc/system.health`, {
+    // Format input for tRPC: ?input={"json":{"timestamp":123}}
+    const input = JSON.stringify({ json: { timestamp: Date.now() } });
+    const url = `${API_URL}/api/trpc/system.health?input=${encodeURIComponent(input)}`;
+    
+    const response = await fetch(url, {
       signal: controller.signal,
     });
     

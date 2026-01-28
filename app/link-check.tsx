@@ -9,12 +9,15 @@ import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
 import { checkLink, saveLinkRecord, LinkCheckResult } from "@/lib/link-checker";
 import { openInBrowser } from "@/lib/open-in-browser";
+import { trpc } from "@/lib/trpc";
 
 export default function LinkCheckScreen() {
   const colors = useColors();
   const router = useRouter();
   const params = useLocalSearchParams<{ url: string }>();
   
+  const scanUrlMutation = trpc.fraud.scanUrl.useMutation();
+
   const [isLoading, setIsLoading] = useState(true);
   const [result, setResult] = useState<LinkCheckResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +33,37 @@ export default function LinkCheckScreen() {
 
       try {
         setIsLoading(true);
-        const checkResult = await checkLink(params.url);
+        let checkResult = await checkLink(params.url);
+
+        // Server-side enhanced check (Hybrid Security)
+        try {
+          // Verify with Google Safe Browsing and VirusTotal
+          const serverResult = await scanUrlMutation.mutateAsync({ url: params.url });
+          
+          if (serverResult.success && serverResult.data) {
+             const { safe, threats } = serverResult.data;
+             if (!safe) {
+               // Override local result if server detects a threat
+               checkResult = {
+                 ...checkResult,
+                 isSafe: false,
+                 riskLevel: "dangerous",
+                 riskScore: 0,
+                 warnings: [
+                   ...checkResult.warnings, 
+                   ...threats.map(t => `${t.threatType} (${t.source.toUpperCase()})`)
+                 ],
+                 checks: {
+                   ...checkResult.checks,
+                   isKnownPhishing: true
+                 }
+               };
+             }
+          }
+        } catch (serverErr) {
+          console.warn("Server scan unavailable, relying on local heuristics:", serverErr);
+        }
+
         setResult(checkResult);
         
         // Haptic feedback based on risk level

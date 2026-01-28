@@ -9,13 +9,51 @@ import axios from "axios";
 const GOOGLE_SAFE_BROWSING_API_KEY = process.env.GOOGLE_SAFE_BROWSING_API_KEY || "";
 const VIRUSTOTAL_API_KEY = process.env.VIRUSTOTAL_API_KEY || "";
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeUrlInput(raw: string): string | null {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return null;
+
+  // Remove common wrappers and trailing punctuation from copied links.
+  const withoutWrappers = trimmed.replace(/^[<(\[]+/, "").replace(/[>)\].,;!?]+$/, "");
+  const candidate = withoutWrappers.trim();
+  if (!candidate) return null;
+
+  // If already a valid URL, keep it.
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.toString();
+  } catch {
+    // fall through
+  }
+
+  // Support scheme-less domains (e.g. "eicar.org", "www.example.com/path").
+  const looksLikeDomainOrUrl = /^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(candidate);
+  if (looksLikeDomainOrUrl) {
+    const prefixed = candidate.startsWith("www.") ? `https://${candidate}` : `https://${candidate}`;
+    try {
+      const parsed = new URL(prefixed);
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
 /**
  * Extract URLs from text (UPI transaction notes, QR data)
  */
 export function extractUrls(text: string): string[] {
   const urlRegex = /(https?:\/\/[^\s]+)/g;
   const matches = text.match(urlRegex);
-  return matches || [];
+  return (matches || [])
+    .map((m) => normalizeUrlInput(m))
+    .filter((u): u is string => Boolean(u));
 }
 
 /**
@@ -52,7 +90,7 @@ export async function checkGoogleSafeBrowsing(urls: string[]): Promise<{
 }> {
   if (!GOOGLE_SAFE_BROWSING_API_KEY) {
     console.warn("Google Safe Browsing API key not configured");
-    return { safe: true, threats: [] };
+    return { safe: false, threats: [{ url: "", threatType: "GSB_UNAVAILABLE", platformType: "ANY_PLATFORM" }] };
   }
 
   if (urls.length === 0) {
@@ -100,8 +138,8 @@ export async function checkGoogleSafeBrowsing(urls: string[]): Promise<{
     return { safe: true, threats: [] };
   } catch (error) {
     console.error("Google Safe Browsing API error:", error);
-    // Fail open (assume safe) if API is unavailable
-    return { safe: true, threats: [] };
+    // Do not claim safe if the API is unavailable
+    return { safe: false, threats: [{ url: "", threatType: "GSB_ERROR", platformType: "ANY_PLATFORM" }] };
   }
 }
 
@@ -116,23 +154,37 @@ export async function checkVirusTotal(url: string): Promise<{
   harmless: number;
   undetected: number;
   scanId?: string;
+  analysisStatus?: string;
 }> {
   if (!VIRUSTOTAL_API_KEY) {
     console.warn("VirusTotal API key not configured");
     return {
-      safe: true,
+      safe: false,
       malicious: 0,
       suspicious: 0,
       harmless: 0,
       undetected: 0,
+      analysisStatus: "VT_UNAVAILABLE",
     };
   }
 
   try {
+    const normalizedUrl = normalizeUrlInput(url);
+    if (!normalizedUrl) {
+      return {
+        safe: false,
+        malicious: 0,
+        suspicious: 0,
+        harmless: 0,
+        undetected: 0,
+        analysisStatus: "VT_INVALID_URL",
+      };
+    }
+
     // Step 1: Submit URL for scanning
     const submitResponse = await axios.post(
       "https://www.virustotal.com/api/v3/urls",
-      new URLSearchParams({ url }),
+      new URLSearchParams({ url: normalizedUrl }),
       {
         headers: {
           "x-apikey": VIRUSTOTAL_API_KEY,
@@ -144,36 +196,67 @@ export async function checkVirusTotal(url: string): Promise<{
 
     const scanId = submitResponse.data.data.id;
 
-    // Step 2: Get scan results (may need to wait for analysis)
-    const resultResponse = await axios.get(
-      `https://www.virustotal.com/api/v3/analyses/${scanId}`,
-      {
-        headers: {
-          "x-apikey": VIRUSTOTAL_API_KEY,
-        },
-        timeout: 5000,
-      }
-    );
+    // Step 2: Poll analysis until completed (or we give up)
+    let lastStatus: string | undefined;
+    let lastStats: any = undefined;
 
-    const stats = resultResponse.data.data.attributes.stats;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const resultResponse = await axios.get(
+        `https://www.virustotal.com/api/v3/analyses/${scanId}`,
+        {
+          headers: { "x-apikey": VIRUSTOTAL_API_KEY },
+          timeout: 5000,
+        }
+      );
+
+      const attrs = resultResponse.data?.data?.attributes;
+      lastStatus = attrs?.status;
+      lastStats = attrs?.stats;
+
+      if (lastStatus === "completed") break;
+
+      // backoff: 600ms, 1200ms, 1800ms
+      await sleep(600 * (attempt + 1));
+    }
+
+    const stats = lastStats || {};
+    const malicious = stats.malicious || 0;
+    const suspicious = stats.suspicious || 0;
+    const harmless = stats.harmless || 0;
+    const undetected = stats.undetected || 0;
+
+    // If not completed, don't claim safe. Treat as "unknown/pending".
+    if (lastStatus && lastStatus !== "completed") {
+      return {
+        safe: false,
+        malicious,
+        suspicious,
+        harmless,
+        undetected,
+        scanId,
+        analysisStatus: `VT_${String(lastStatus).toUpperCase()}`,
+      };
+    }
 
     return {
-      safe: stats.malicious === 0 && stats.suspicious === 0,
-      malicious: stats.malicious || 0,
-      suspicious: stats.suspicious || 0,
-      harmless: stats.harmless || 0,
-      undetected: stats.undetected || 0,
+      safe: malicious === 0 && suspicious === 0,
+      malicious,
+      suspicious,
+      harmless,
+      undetected,
       scanId,
+      analysisStatus: lastStatus ? `VT_${String(lastStatus).toUpperCase()}` : "VT_UNKNOWN",
     };
   } catch (error) {
     console.error("VirusTotal API error:", error);
-    // Fail open (assume safe) if API is unavailable
+    // Do not claim safe if the API is unavailable
     return {
-      safe: true,
+      safe: false,
       malicious: 0,
       suspicious: 0,
       harmless: 0,
       undetected: 0,
+      analysisStatus: "VT_ERROR",
     };
   }
 }
@@ -195,7 +278,13 @@ export async function scanLinks(text: string): Promise<{
   }>;
 }> {
   // Extract URLs from text
-  const urls = extractUrls(text);
+  let urls = extractUrls(text);
+
+  // If the input itself is a URL (common for deep link scanning), normalize and scan it.
+  if (urls.length === 0) {
+    const normalized = normalizeUrlInput(text);
+    if (normalized) urls = [normalized];
+  }
 
   if (urls.length === 0) {
     return {
@@ -257,7 +346,10 @@ export async function scanLinks(text: string): Promise<{
     threats.push({
       url: expandedUrls[0].original,
       expandedUrl: expandedUrls[0].expanded,
-      threatType: `Malicious: ${virusTotalResult.malicious}, Suspicious: ${virusTotalResult.suspicious}`,
+      threatType:
+        virusTotalResult.malicious > 0 || virusTotalResult.suspicious > 0
+          ? `Malicious: ${virusTotalResult.malicious}, Suspicious: ${virusTotalResult.suspicious}`
+          : `VirusTotal: ${virusTotalResult.analysisStatus || "VT_UNKNOWN"}`,
       source: "virustotal",
     });
   }

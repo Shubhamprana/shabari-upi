@@ -43,15 +43,20 @@ export default function LinkCheckScreen() {
           if (serverResult.success && serverResult.data) {
              const { safe, threats } = serverResult.data;
              if (!safe) {
+               const threatText = threats.map((t) => `${t.threatType} (${t.source.toUpperCase()})`);
+               const isSoftOnly = threatText.every((t) =>
+                 /(UNAVAILABLE|_ERROR|VT_QUEUED|VT_IN-PROGRESS|VT_IN_PROGRESS|VT_UNKNOWN|VT_INVALID_URL|VT_UNAVAILABLE)/i.test(t)
+               );
+
                // Override local result if server detects a threat
                checkResult = {
                  ...checkResult,
                  isSafe: false,
-                 riskLevel: "dangerous",
-                 riskScore: 0,
+                 riskLevel: isSoftOnly ? "suspicious" : "dangerous",
+                 riskScore: isSoftOnly ? Math.min(checkResult.riskScore, 40) : 0,
                  warnings: [
                    ...checkResult.warnings, 
-                   ...threats.map(t => `${t.threatType} (${t.source.toUpperCase()})`)
+                   ...threatText
                  ],
                  checks: {
                    ...checkResult.checks,

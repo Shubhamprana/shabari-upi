@@ -361,7 +361,7 @@ export const fraudDetectionRouter = router({
   scanUrl: publicProcedure
     .input(
       z.object({
-        url: z.string().url("Invalid URL format"),
+        url: z.string().min(1, "URL is required"),
       })
     )
     .mutation(async ({ input }) => {

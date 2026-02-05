@@ -13,6 +13,16 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function toVirusTotalUrlId(normalizedUrl: string): string {
+  // VT URL identifier is base64url(url) without padding.
+  // See: https://docs.virustotal.com/reference/url
+  return Buffer.from(normalizedUrl, "utf-8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
 function normalizeUrlInput(raw: string): string | null {
   const trimmed = (raw || "").trim();
   if (!trimmed) return null;
@@ -181,6 +191,34 @@ export async function checkVirusTotal(url: string): Promise<{
       };
     }
 
+    // Step 0: Try cached URL report first (often avoids VT_QUEUED)
+    try {
+      const urlId = toVirusTotalUrlId(normalizedUrl);
+      const reportResponse = await axios.get(`https://www.virustotal.com/api/v3/urls/${urlId}`, {
+        headers: { "x-apikey": VIRUSTOTAL_API_KEY },
+        timeout: 5000,
+      });
+
+      const attrs = reportResponse.data?.data?.attributes;
+      const stats = attrs?.last_analysis_stats;
+      if (stats) {
+        const malicious = stats.malicious || 0;
+        const suspicious = stats.suspicious || 0;
+        const harmless = stats.harmless || 0;
+        const undetected = stats.undetected || 0;
+        return {
+          safe: malicious === 0 && suspicious === 0,
+          malicious,
+          suspicious,
+          harmless,
+          undetected,
+          analysisStatus: "VT_CACHED",
+        };
+      }
+    } catch {
+      // Ignore and fall back to submit+poll.
+    }
+
     // Step 1: Submit URL for scanning
     const submitResponse = await axios.post(
       "https://www.virustotal.com/api/v3/urls",
@@ -200,7 +238,7 @@ export async function checkVirusTotal(url: string): Promise<{
     let lastStatus: string | undefined;
     let lastStats: any = undefined;
 
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       const resultResponse = await axios.get(
         `https://www.virustotal.com/api/v3/analyses/${scanId}`,
         {
@@ -215,8 +253,8 @@ export async function checkVirusTotal(url: string): Promise<{
 
       if (lastStatus === "completed") break;
 
-      // backoff: 600ms, 1200ms, 1800ms
-      await sleep(600 * (attempt + 1));
+      // backoff: 700ms, 1400ms, 2100ms, 2800ms, 3500ms
+      await sleep(700 * (attempt + 1));
     }
 
     const stats = lastStats || {};
@@ -310,12 +348,13 @@ export async function scanLinks(text: string): Promise<{
   );
 
   // Check with VirusTotal (only first URL to avoid rate limits)
-  let virusTotalResult = {
+  let virusTotalResult: Awaited<ReturnType<typeof checkVirusTotal>> = {
     safe: true,
     malicious: 0,
     suspicious: 0,
     harmless: 0,
     undetected: 0,
+    analysisStatus: undefined,
   };
 
   if (expandedUrls.length > 0) {

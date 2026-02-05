@@ -65,6 +65,13 @@ export default function HomeScreen() {
     console.log("View scan detail:", scanId);
   };
 
+  const handleSafeBrowserPress = () => {
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    router.push("/safe-browser");
+  };
+
   const getRiskColor = (tier: string) => {
     switch (tier) {
       case "green":
@@ -145,6 +152,60 @@ export default function HomeScreen() {
             <Text className="text-sm text-muted mt-1">
               Verify payment before you pay
             </Text>
+          </View>
+
+          {/* Quick Actions */}
+          <View className="gap-3">
+            <Text className="text-lg font-semibold text-foreground">
+              Quick Actions
+            </Text>
+            <View className="flex-row gap-3">
+              {/* Safe Browser */}
+              <Pressable
+                onPress={handleSafeBrowserPress}
+                style={({ pressed }) => [
+                  { flex: 1, opacity: pressed ? 0.7 : 1 },
+                ]}
+              >
+                <View className="bg-surface rounded-xl p-4 border border-border items-center gap-2">
+                  <View
+                    className="w-12 h-12 rounded-full items-center justify-center"
+                    style={{ backgroundColor: `${colors.primary}20` }}
+                  >
+                    <IconSymbol name="globe" size={24} color={colors.primary} />
+                  </View>
+                  <Text className="text-sm font-semibold text-foreground text-center">
+                    Safe Browser
+                  </Text>
+                  <Text className="text-xs text-muted text-center">
+                    Browse securely
+                  </Text>
+                </View>
+              </Pressable>
+
+              {/* Link Checker */}
+              <Pressable
+                onPress={() => router.push("/link-check")}
+                style={({ pressed }) => [
+                  { flex: 1, opacity: pressed ? 0.7 : 1 },
+                ]}
+              >
+                <View className="bg-surface rounded-xl p-4 border border-border items-center gap-2">
+                  <View
+                    className="w-12 h-12 rounded-full items-center justify-center"
+                    style={{ backgroundColor: `${colors.warning}20` }}
+                  >
+                    <IconSymbol name="link" size={24} color={colors.warning} />
+                  </View>
+                  <Text className="text-sm font-semibold text-foreground text-center">
+                    Check Link
+                  </Text>
+                  <Text className="text-xs text-muted text-center">
+                    Scan any URL
+                  </Text>
+                </View>
+              </Pressable>
+            </View>
           </View>
 
           {/* Statistics Cards */}

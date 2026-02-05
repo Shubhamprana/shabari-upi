@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Text, View, Pressable, Platform, ActivityIndicator, StyleSheet, Dimensions } from "react-native";
+import { Text, View, Pressable, Platform, ActivityIndicator, StyleSheet, Dimensions, Alert } from "react-native";
 import { Camera, CameraView, useCameraPermissions, type BarcodeScanningResult } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
 import * as Haptics from "expo-haptics";
@@ -10,6 +10,56 @@ import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
 
 const { width, height } = Dimensions.get("window");
+
+/**
+ * Analyze QR data and determine content type
+ */
+type QRContentType = 
+  | { type: "upi"; data: string }
+  | { type: "url"; data: string }
+  | { type: "text"; data: string };
+
+function analyzeQRContent(rawData: string): QRContentType {
+  const trimmed = rawData.trim();
+  
+  // 1. Direct UPI link
+  if (trimmed.toLowerCase().startsWith("upi://") || trimmed.toLowerCase().startsWith("upi:pay")) {
+    return { type: "upi", data: trimmed };
+  }
+  
+  // 2. Direct HTTP/HTTPS URL
+  if (trimmed.toLowerCase().startsWith("http://") || trimmed.toLowerCase().startsWith("https://")) {
+    // Check if URL contains UPI parameters (common pattern: payment link with ?pa= or ?upi=)
+    try {
+      const url = new URL(trimmed);
+      const upiParam = url.searchParams.get("upi") || url.searchParams.get("pa");
+      if (upiParam) {
+        // Extract UPI string from URL parameter
+        const upiString = upiParam.startsWith("upi://") ? upiParam : `upi://pay?pa=${upiParam}`;
+        return { type: "upi", data: upiString };
+      }
+    } catch {
+      // URL parsing failed, treat as regular URL
+    }
+    return { type: "url", data: trimmed };
+  }
+  
+  // 3. Text that might contain a URL or UPI string
+  // Try to extract UPI string first
+  const upiMatch = trimmed.match(/upi:\/\/[^\s]+/i);
+  if (upiMatch) {
+    return { type: "upi", data: upiMatch[0] };
+  }
+  
+  // Try to extract URL
+  const urlMatch = trimmed.match(/https?:\/\/[^\s]+/i);
+  if (urlMatch) {
+    return { type: "url", data: urlMatch[0] };
+  }
+  
+  // Plain text (no actionable content)
+  return { type: "text", data: trimmed };
+}
 
 export default function ScannerScreen() {
   const colors = useColors();
@@ -37,11 +87,38 @@ export default function ScannerScreen() {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
 
-    // Navigate to risk assessment screen with scanned data
-    router.push({
-      pathname: "/risk-assessment",
-      params: { upiString: data, source: "qr_scan" },
-    });
+    // Analyze QR content and route accordingly
+    const content = analyzeQRContent(data);
+    
+    switch (content.type) {
+      case "upi":
+        // Payment QR → Route to payment risk assessment
+        router.push({
+          pathname: "/risk-assessment",
+          params: { upiString: content.data, source: "qr_scan" },
+        });
+        break;
+        
+      case "url":
+        // Website link → Route to link safety check
+        router.push({
+          pathname: "/link-check",
+          params: { url: content.data, source: "qr_scan" },
+        });
+        break;
+        
+      case "text":
+        // Plain text with no actionable content
+        if (Platform.OS !== "web") {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        }
+        Alert.alert(
+          "QR Code Scanned",
+          `This QR code contains plain text:\n\n"${content.data.substring(0, 100)}${content.data.length > 100 ? "..." : ""}"`,
+          [{ text: "OK" }]
+        );
+        break;
+    }
 
     // Reset scanning state after navigation
     setTimeout(() => {
@@ -120,7 +197,6 @@ export default function ScannerScreen() {
       <CameraView
         onBarcodeScanned={isScanning ? undefined : handleBarCodeScanned}
         style={StyleSheet.absoluteFillObject}
-        barcodeScannerEnabled={!isScanning}
         barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
       />
 
@@ -129,12 +205,12 @@ export default function ScannerScreen() {
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.headerTitle}>
-            {isScanning ? "Verifying..." : "Scan QR Code"}
+            {isScanning ? "Analyzing..." : "Scan QR Code"}
           </Text>
           <Text style={styles.headerSubtitle}>
             {isScanning
-              ? "Checking for fraud..."
-              : "Point camera at UPI QR code"}
+              ? "Checking for fraud & threats..."
+              : "Point camera at any QR code (Payment, Link, or Text)"}
           </Text>
         </View>
 

@@ -9,6 +9,7 @@ import { IconSymbol } from "@/components/ui/icon-symbol";
 import { useColors } from "@/hooks/use-colors";
 import { checkLink, saveLinkRecord, LinkCheckResult } from "@/lib/link-checker";
 import { openInBrowser } from "@/lib/open-in-browser";
+import { addTrustedDomain } from "@/lib/trusted-domains";
 import { trpc } from "@/lib/trpc";
 
 export default function LinkCheckScreen() {
@@ -45,24 +46,58 @@ export default function LinkCheckScreen() {
              if (!safe) {
                const threatText = threats.map((t) => `${t.threatType} (${t.source.toUpperCase()})`);
                const isSoftOnly = threatText.every((t) =>
-                 /(UNAVAILABLE|_ERROR|VT_QUEUED|VT_IN-PROGRESS|VT_IN_PROGRESS|VT_UNKNOWN|VT_INVALID_URL|VT_UNAVAILABLE)/i.test(t)
+                 /(UNAVAILABLE|_ERROR|VT_UNKNOWN|VT_INVALID_URL|VT_UNAVAILABLE|VT_QUEUED|VT_IN-PROGRESS|VT_IN_PROGRESS|VT_CACHED)/i.test(t)
                );
 
-               // Override local result if server detects a threat
-               checkResult = {
-                 ...checkResult,
-                 isSafe: false,
-                 riskLevel: isSoftOnly ? "suspicious" : "dangerous",
-                 riskScore: isSoftOnly ? Math.min(checkResult.riskScore, 40) : 0,
-                 warnings: [
-                   ...checkResult.warnings, 
-                   ...threatText
-                 ],
-                 checks: {
-                   ...checkResult.checks,
-                   isKnownPhishing: true
-                 }
-               };
+               const hasVirusTotalPending = threatText.some((t) =>
+                 /(VT_QUEUED|VT_IN-PROGRESS|VT_IN_PROGRESS)/i.test(t)
+               );
+
+               const hasGoogleThreat = threats.some((t) => t.source === "google");
+               const rawUrl = String(params.url ?? "").trim();
+               const lowerRawUrl = rawUrl.toLowerCase();
+               const isHttpUrl = lowerRawUrl.startsWith("http://") || lowerRawUrl.startsWith("https://");
+               const isDeepLinkOrPaymentIntent =
+                 !isHttpUrl ||
+                 lowerRawUrl.startsWith("upi://") ||
+                 lowerRawUrl.startsWith("intent://") ||
+                 lowerRawUrl.startsWith("market://") ||
+                 lowerRawUrl.startsWith("tel:") ||
+                 lowerRawUrl.startsWith("mailto:") ||
+                 lowerRawUrl.startsWith("sms:") ||
+                 /[?&](pa|pn|am|tr|cu)=/i.test(rawUrl);
+
+               const localLooksClean =
+                 checkResult.riskLevel === "safe" &&
+                 checkResult.checks.isHTTPS &&
+                 !checkResult.checks.isShortener &&
+                 !checkResult.checks.hasSuspiciousPattern &&
+                 !checkResult.checks.isKnownPhishing;
+
+               // If server scan is pending/unavailable, never mark the link as safe.
+               // Treat as suspicious to avoid false negatives (especially for investor demo).
+               if (isSoftOnly && !hasGoogleThreat && !isDeepLinkOrPaymentIntent && localLooksClean) {
+                 checkResult = {
+                   ...checkResult,
+                   isSafe: false,
+                   riskLevel: "suspicious",
+                   riskScore: Math.min(checkResult.riskScore, 40),
+                   warnings: [...checkResult.warnings, ...threatText],
+                 };
+               } else {
+                 // Override local result if server detects a real threat (or the URL is risky / a payment intent)
+                 checkResult = {
+                   ...checkResult,
+                   isSafe: false,
+                   riskLevel: isSoftOnly && hasVirusTotalPending ? "suspicious" : "dangerous",
+                   riskScore: isSoftOnly && hasVirusTotalPending ? Math.min(checkResult.riskScore, 40) : 0,
+                   warnings: [...checkResult.warnings, ...threatText],
+                   checks: {
+                     ...checkResult.checks,
+                     isKnownPhishing: hasGoogleThreat ? true : checkResult.checks.isKnownPhishing,
+                   },
+                 };
+               }
              }
           }
         } catch (serverErr) {
@@ -92,7 +127,8 @@ export default function LinkCheckScreen() {
     runCheck();
   }, [params.url]);
 
-  const handleOpenLink = async () => {
+  // Open in external browser (Chrome, etc.)
+  const handleOpenExternal = async () => {
     if (!result) return;
     
     if (Platform.OS !== "web") {
@@ -102,20 +138,65 @@ export default function LinkCheckScreen() {
     // Save to history
     await saveLinkRecord(result, "opened");
     
-    // Open in browser
+    // Open in external browser
     try {
       if (Platform.OS === "web") {
         window.open(result.url, "_blank");
+        router.back();
       } else if (Platform.OS === "android") {
-        openInBrowser(result.url);
+        const opened = await openInBrowser(result.url);
+        if (!opened) {
+          // No external browser found; offer Safe Browser instead
+          Alert.alert(
+            "No Browser Found",
+            "No external browser is available. Open in Safe Browser instead?",
+            [
+              { text: "Cancel", style: "cancel" },
+              {
+                text: "Open in Safe Browser",
+                onPress: () => handleOpenSafeBrowser(),
+              },
+            ]
+          );
+          return;
+        }
+        router.back();
       } else {
         await WebBrowser.openBrowserAsync(result.url);
+        router.back();
       }
-    } catch {
-      await Linking.openURL(result.url);
+    } catch (error) {
+      console.error("Error opening external browser:", error);
+      Alert.alert(
+        "Error",
+        "Failed to open browser. Try Safe Browser instead?",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Open in Safe Browser",
+            onPress: () => handleOpenSafeBrowser(),
+          },
+        ]
+      );
+    }
+  };
+
+  // Open in Safe Browser (in-app WebView)
+  const handleOpenSafeBrowser = async () => {
+    if (!result) return;
+    
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
     
-    router.back();
+    // Save to history
+    await saveLinkRecord(result, "opened");
+    
+    // Navigate to safe browser screen
+    router.replace({
+      pathname: "/safe-browser",
+      params: { url: result.url },
+    });
   };
 
   const handleBlock = async () => {
@@ -183,10 +264,56 @@ export default function LinkCheckScreen() {
     );
   };
 
+  // Skip scan and open directly (for loading screen)
+  const handleSkipToExternal = async () => {
+    if (!params.url) return;
+    
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    }
+    
+    // Open in external browser immediately
+    try {
+      if (Platform.OS === "web") {
+        window.open(params.url, "_blank");
+        router.back();
+      } else if (Platform.OS === "android") {
+        const opened = await openInBrowser(params.url);
+        if (!opened) {
+          // No external browser found; go to Safe Browser instead
+          handleSkipToSafeBrowser();
+          return;
+        }
+        router.back();
+      } else {
+        await WebBrowser.openBrowserAsync(params.url);
+        router.back();
+      }
+    } catch (error) {
+      console.error("Error skipping to external browser:", error);
+      // Fallback: open in Safe Browser
+      handleSkipToSafeBrowser();
+    }
+  };
+
+  const handleSkipToSafeBrowser = () => {
+    if (!params.url) return;
+    
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    }
+    
+    // Navigate to safe browser screen immediately
+    router.replace({
+      pathname: "/safe-browser",
+      params: { url: params.url },
+    });
+  };
+
   if (isLoading) {
     return (
       <ScreenContainer className="bg-background items-center justify-center">
-        <View className="items-center gap-4">
+        <View className="items-center gap-4 px-6">
           <ActivityIndicator size="large" color={colors.primary} />
           <Text className="text-lg font-semibold text-foreground">
             Checking Link Safety...
@@ -194,6 +321,60 @@ export default function LinkCheckScreen() {
           <Text className="text-sm text-muted text-center px-8">
             Analyzing URL for phishing, malware, and scams
           </Text>
+          
+          {/* Skip options during loading */}
+          <View className="w-full gap-3 mt-6">
+            <Text className="text-xs text-muted text-center">
+              Don't want to wait?
+            </Text>
+            
+            <Pressable
+              onPress={handleSkipToSafeBrowser}
+              style={({ pressed }) => [
+                {
+                  transform: [{ scale: pressed ? 0.97 : 1 }],
+                  opacity: pressed ? 0.8 : 1,
+                },
+              ]}
+            >
+              <View className="bg-primary/10 border border-primary rounded-2xl p-3 items-center flex-row justify-center gap-2">
+                <IconSymbol name="checkmark.shield.fill" size={18} color={colors.primary} />
+                <Text className="text-primary font-semibold text-sm">
+                  Skip & Open in Safe Browser
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              onPress={handleSkipToExternal}
+              style={({ pressed }) => [
+                {
+                  opacity: pressed ? 0.5 : 0.7,
+                },
+              ]}
+            >
+              <View className="items-center py-2">
+                <Text className="text-muted text-sm">
+                  Skip & Open in Chrome (Risky)
+                </Text>
+              </View>
+            </Pressable>
+            
+            <Pressable
+              onPress={handleCancel}
+              style={({ pressed }) => [
+                {
+                  opacity: pressed ? 0.5 : 0.7,
+                },
+              ]}
+            >
+              <View className="items-center py-2">
+                <Text className="text-muted text-xs">
+                  Cancel
+                </Text>
+              </View>
+            </Pressable>
+          </View>
         </View>
       </ScreenContainer>
     );
@@ -289,6 +470,21 @@ export default function LinkCheckScreen() {
                   </View>
                 </>
               )}
+
+              {/* Informational notes (e.g., VT queued/unavailable) */}
+              {warnings.length > 0 && (
+                <>
+                  <View className="h-px bg-border" />
+                  <View className="bg-primary/10 border border-primary/20 rounded-lg p-3 gap-1">
+                    <Text className="text-sm text-primary font-semibold">Info</Text>
+                    {warnings.map((warning, index) => (
+                      <Text key={index} className="text-sm text-primary">
+                        • {warning}
+                      </Text>
+                    ))}
+                  </View>
+                </>
+              )}
               
               {/* Security Checks */}
               <View className="h-px bg-border" />
@@ -310,8 +506,9 @@ export default function LinkCheckScreen() {
 
             {/* Action Buttons */}
             <View className="gap-3">
+              {/* Primary: Open in Safe Browser */}
               <Pressable
-                onPress={handleOpenLink}
+                onPress={handleOpenSafeBrowser}
                 style={({ pressed }) => [
                   {
                     transform: [{ scale: pressed ? 0.97 : 1 }],
@@ -319,9 +516,28 @@ export default function LinkCheckScreen() {
                   },
                 ]}
               >
-                <View className="bg-success rounded-2xl p-4 items-center">
+                <View className="bg-success rounded-2xl p-4 items-center flex-row justify-center gap-2">
+                  <IconSymbol name="checkmark.shield.fill" size={20} color="#FFFFFF" />
                   <Text className="text-white font-bold text-lg">
-                    Open Link
+                    Open in Safe Browser
+                  </Text>
+                </View>
+              </Pressable>
+
+              {/* Secondary: Open in External Browser */}
+              <Pressable
+                onPress={handleOpenExternal}
+                style={({ pressed }) => [
+                  {
+                    transform: [{ scale: pressed ? 0.97 : 1 }],
+                    opacity: pressed ? 0.9 : 1,
+                  },
+                ]}
+              >
+                <View className="bg-surface border border-border rounded-2xl p-4 items-center flex-row justify-center gap-2">
+                  <IconSymbol name="safari" size={20} color={colors.foreground} />
+                  <Text className="text-foreground font-bold text-base">
+                    Open in Chrome/Browser
                   </Text>
                 </View>
               </Pressable>
@@ -447,8 +663,9 @@ export default function LinkCheckScreen() {
                 </View>
               </Pressable>
 
+              {/* Open in Safe Browser (recommended for suspicious links) */}
               <Pressable
-                onPress={handleOpenLink}
+                onPress={handleOpenSafeBrowser}
                 style={({ pressed }) => [
                   {
                     transform: [{ scale: pressed ? 0.97 : 1 }],
@@ -456,9 +673,26 @@ export default function LinkCheckScreen() {
                   },
                 ]}
               >
-                <View className="bg-warning rounded-2xl p-4 items-center">
+                <View className="bg-warning rounded-2xl p-4 items-center flex-row justify-center gap-2">
+                  <IconSymbol name="checkmark.shield.fill" size={20} color="#FFFFFF" />
                   <Text className="text-white font-bold text-lg">
-                    Open Anyway
+                    Open in Safe Browser
+                  </Text>
+                </View>
+              </Pressable>
+
+              {/* Open in External Browser */}
+              <Pressable
+                onPress={handleOpenExternal}
+                style={({ pressed }) => [
+                  {
+                    opacity: pressed ? 0.7 : 1,
+                  },
+                ]}
+              >
+                <View className="items-center py-3">
+                  <Text className="text-muted font-semibold">
+                    Open in Chrome (Not Recommended)
                   </Text>
                 </View>
               </Pressable>
@@ -551,17 +785,34 @@ export default function LinkCheckScreen() {
               </View>
             </Pressable>
 
+            {/* Safe Browser option for dangerous links */}
             <Pressable
-              onPress={handleOpenLink}
+              onPress={handleOpenSafeBrowser}
               style={({ pressed }) => [
                 {
                   opacity: pressed ? 0.7 : 1,
                 },
               ]}
             >
-              <View className="border border-white/30 rounded-2xl p-4 items-center">
+              <View className="border border-white/30 rounded-2xl p-4 items-center flex-row justify-center gap-2">
+                <IconSymbol name="checkmark.shield.fill" size={18} color="rgba(255,255,255,0.7)" />
                 <Text className="text-white/70 font-semibold">
-                  Open Anyway (Not Recommended)
+                  Open in Safe Browser (Risky)
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              onPress={handleOpenExternal}
+              style={({ pressed }) => [
+                {
+                  opacity: pressed ? 0.5 : 0.7,
+                },
+              ]}
+            >
+              <View className="items-center py-2">
+                <Text className="text-white/50 text-sm">
+                  Open in Chrome (Very Risky)
                 </Text>
               </View>
             </Pressable>
